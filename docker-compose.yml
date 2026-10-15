@@ -1,0 +1,178 @@
+# =============================================================================
+# ShopFlow — Docker Compose (Phase 6: Horizontal Scaling + Load Balancing)
+# =============================================================================
+# ARCHITECTURE:
+#   User → Nginx (port 80) → backend_1 / backend_2 / backend_3 → PostgreSQL + Redis
+#
+# SERVICES:
+#   1. postgres       — Database (port 5432)
+#   2. redis          — Cache + Distributed Locks (port 6379)
+#   3. backend_1      — Express API replica 1 (internal port 8080)
+#   4. backend_2      — Express API replica 2 (internal port 8080)
+#   5. backend_3      — Express API replica 3 (internal port 8080)
+#   6. nginx          — Load Balancer + Frontend (port 80 → exposed to user)
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # 1. PostgreSQL — The Single Source of Truth
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: shopflow_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: secretpassword
+      POSTGRES_DB: shopflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - shopflow-network
+
+  # ---------------------------------------------------------------------------
+  # 2. Redis — Cache + Distributed Lock Store
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: shopflow_redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: [ "CMD", "redis-cli", "ping" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - shopflow-network
+
+  # ---------------------------------------------------------------------------
+  # 3. Backend Replica 1
+  # ---------------------------------------------------------------------------
+  # All 3 replicas are IDENTICAL — same image, same env, same code.
+  # They are STATELESS — all state lives in PostgreSQL and Redis.
+  # The only difference is the container_name (for Docker DNS resolution).
+  # ---------------------------------------------------------------------------
+  backend_1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: backend_1
+    restart: unless-stopped
+    environment:
+      PORT: 8080
+      NODE_ENV: production
+      DATABASE_URL: postgresql://postgres:secretpassword@postgres:5432/shopflow
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: supersecretproductionjwtkey1234567890
+      JWT_EXPIRES_IN: 15m
+      REFRESH_TOKEN_EXPIRES_IN: 7d
+      SERVER_ID: backend_1
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - shopflow-network
+
+  # ---------------------------------------------------------------------------
+  # 4. Backend Replica 2
+  # ---------------------------------------------------------------------------
+  backend_2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: backend_2
+    restart: unless-stopped
+    environment:
+      PORT: 8080
+      NODE_ENV: production
+      DATABASE_URL: postgresql://postgres:secretpassword@postgres:5432/shopflow
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: supersecretproductionjwtkey1234567890
+      JWT_EXPIRES_IN: 15m
+      REFRESH_TOKEN_EXPIRES_IN: 7d
+      SERVER_ID: backend_2
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - shopflow-network
+
+  # ---------------------------------------------------------------------------
+  # 5. Backend Replica 3
+  # ---------------------------------------------------------------------------
+  backend_3:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: backend_3
+    restart: unless-stopped
+    environment:
+      PORT: 8080
+      NODE_ENV: production
+      DATABASE_URL: postgresql://postgres:secretpassword@postgres:5432/shopflow
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: supersecretproductionjwtkey1234567890
+      JWT_EXPIRES_IN: 15m
+      REFRESH_TOKEN_EXPIRES_IN: 7d
+      SERVER_ID: backend_3
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - shopflow-network
+
+  # ---------------------------------------------------------------------------
+  # 6. Nginx — Load Balancer + Frontend Server
+  # ---------------------------------------------------------------------------
+  # This is the ONLY service exposed to the outside world (port 80).
+  # It routes /api/* to backends (round-robin) and serves React frontend.
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:alpine
+    container_name: shopflow_nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    volumes:
+      # Mount our custom nginx config
+      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
+      # Mount the frontend build output so Nginx can serve it
+      - ./frontend/dist:/usr/share/nginx/html
+    depends_on:
+      - backend_1
+      - backend_2
+      - backend_3
+    networks:
+      - shopflow-network
+
+# =============================================================================
+# Volumes — Persistent data storage (survives container restarts)
+# =============================================================================
+volumes:
+  pgdata:
+  redisdata:
+
+    # =============================================================================
+    # Networks — Internal communication channel between all containers
+    # =============================================================================
+networks:
+  shopflow-network:
+    driver: bridge
